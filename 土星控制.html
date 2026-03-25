@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Saturn Particle System - Kepler Dynamics</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Inter', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        .ui-overlay {
+            position: absolute; top: 20px; right: 20px; z-index: 100;
+            display: flex; gap: 10px;
+        }
+        button {
+            background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white; padding: 10px 20px; cursor: pointer; backdrop-filter: blur(10px);
+            transition: all 0.3s; border-radius: 4px; text-transform: uppercase; letter-spacing: 1px;
+        }
+        button:hover { background: rgba(255, 255, 255, 0.2); border-color: #fff; }
+        #video-preview { position: absolute; bottom: 20px; left: 20px; width: 160px; height: 120px; border-radius: 8px; border: 1px solid #444; transform: scaleX(-1); }
+        #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 1.2rem; }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在初始化光学追踪系统...</div>
+    <div class="ui-overlay">
+        <button onclick="toggleFullScreen()">Toggle Fullscreen</button>
+    </div>
+    <video id="video-preview" autoplay></video>
+    <div id="canvas-container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        let scene, camera, renderer, coreParticles, ringParticles;
+        let gestureScale = 1.0; // 手势缩放系数
+        const PARTICLE_COUNT_CORE = 15000;
+        const PARTICLE_COUNT_RING = 40000;
+
+        // --- 初始化 MediaPipe 手势检测 ---
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults((results) => {
+            document.getElementById('loading').style.display = 'none';
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                // 计算大拇指(4)和食指(8)的距离
+                const thumb = landmarks[4];
+                const index = landmarks[8];
+                const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2));
+                // 将距离映射为 0.5 到 3.0 的缩放
+                gestureScale = THREE.MathUtils.lerp(gestureScale, dist * 8, 0.1);
+            }
+        });
+
+        const videoElement = document.getElementById('video-preview');
+        const cameraPipe = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        cameraPipe.start();
+
+        // --- Three.js 核心逻辑 ---
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 100;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // 创建土星核心 (粒子球体)
+            const coreGeometry = new THREE.BufferGeometry();
+            const corePos = [];
+            for (let i = 0; i < PARTICLE_COUNT_CORE; i++) {
+                const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT_CORE);
+                const theta = Math.sqrt(PARTICLE_COUNT_CORE * Math.PI) * phi;
+                corePos.push(
+                    Math.cos(theta) * Math.sin(phi) * 15,
+                    Math.sin(theta) * Math.sin(phi) * 15,
+                    Math.cos(phi) * 15
+                );
+            }
+            coreGeometry.setAttribute('position', new THREE.Float32BufferAttribute(corePos, 3));
+            const coreMaterial = new THREE.PointsMaterial({
+                color: 0xffcc88, size: 0.15, blending: THREE.AdditiveBlending, transparent: true
+            });
+            coreParticles = new THREE.Points(coreGeometry, coreMaterial);
+            scene.add(coreParticles);
+
+            // 创建土星环 (开普勒轨道)
+            const ringGeometry = new THREE.BufferGeometry();
+            const ringPos = [];
+            const ringData = []; // 存储半长轴、相位等
+            for (let i = 0; i < PARTICLE_COUNT_RING; i++) {
+                const r = THREE.MathUtils.randFloat(25, 50); // 轨道半径 (a)
+                const angle = Math.random() * Math.PI * 2;
+                ringPos.push(Math.cos(angle) * r, (Math.random()-0.5)*1, Math.sin(angle) * r);
+                ringData.push({
+                    a: r,
+                    angle: angle,
+                    speed: 1 / Math.sqrt(Math.pow(r, 3)) * 50 // 开普勒第三定律简化比例
+                });
+            }
+            ringGeometry.setAttribute('position', new THREE.Float32BufferAttribute(ringPos, 3));
+            const ringMaterial = new THREE.PointsMaterial({
+                color: 0xaa99ff, size: 0.1, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.6
+            });
+            ringParticles = new THREE.Points(ringGeometry, ringMaterial);
+            scene.add(ringParticles);
+            
+            ringParticles.userData.data = ringData;
+
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = Date.now() * 0.001;
+            const positions = ringParticles.geometry.attributes.position.array;
+            const ringData = ringParticles.userData.data;
+
+            // 处理全系统缩放
+            const visualScale = gestureScale;
+            scene.scale.set(visualScale, visualScale, visualScale);
+
+            // 亮度物理规律 (平方反比简版：大则亮，小则暗)
+            const brightness = Math.min(visualScale * 0.5, 1.2);
+            coreParticles.material.opacity = brightness;
+            ringParticles.material.opacity = brightness * 0.7;
+
+            // 临界点判断：当 scale 超过 2.2 时触发混沌噪点
+            const isChaotic = visualScale > 2.2;
+            const chaosIntensity = isChaotic ? (visualScale - 2.2) * 5 : 0;
+
+            for (let i = 0; i < PARTICLE_COUNT_RING; i++) {
+                const data = ringData[i];
+                
+                // 开普勒轨道更新
+                data.angle += data.speed;
+                let targetX = Math.cos(data.angle) * data.a;
+                let targetZ = Math.sin(data.angle) * data.a;
+                let targetY = (Math.sin(time + data.a) * 0.5);
+
+                // 混沌叠加 (布朗运动/高频噪点)
+                if (isChaotic) {
+                    targetX += (Math.random() - 0.5) * chaosIntensity;
+                    targetY += (Math.random() - 0.5) * chaosIntensity;
+                    targetZ += (Math.random() - 0.5) * chaosIntensity;
+                }
+
+                positions[i * 3] = targetX;
+                positions[i * 3 + 1] = targetY;
+                positions[i * 3 + 2] = targetZ;
+            }
+
+            ringParticles.geometry.attributes.position.needsUpdate = true;
+            
+            // 核心自转
+            coreParticles.rotation.y += 0.005;
+            ringParticles.rotation.y += 0.001;
+
+            renderer.render(scene, camera);
+        }
+
+        function toggleFullScreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>
